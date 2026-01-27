@@ -1,0 +1,164 @@
+// C++ code
+//
+#include <EEPROM.h>
+#include <Wire.h>
+#include <LiquidCrystal_I2C.h>
+
+LiquidCrystal_I2C lcd(0x27, 16, 2);
+
+// Пины
+const int sensorPin = A0;      // Датчик влажности почвы
+const int waterLevelPin = A1;  // Датчик уровня воды (НОВОЕ)
+const int pumpPin = 8;
+const int blueLED = 4;   
+const int greenLED = 5;  
+const int buzzer = 6;
+const int yellowLED = 7; 
+const int redLED = 9;    
+const int btnPlus = 2;
+const int btnMinus = 3;
+
+// Настройки
+int moistureThreshold = 600;
+int waterThreshold = 100;      // Порог уровня воды (НОВОЕ)
+int wateringTime; 
+unsigned long wateringInterval = 6UL * 3600UL * 1000UL; 
+unsigned long lastWaterTime = 0;
+unsigned long lastButtonTime = 0;
+
+bool configMode = false; 
+
+void setup() {
+  pinMode(pumpPin, OUTPUT);
+  pinMode(blueLED, OUTPUT);
+  pinMode(greenLED, OUTPUT);
+  pinMode(yellowLED, OUTPUT);
+  pinMode(redLED, OUTPUT);
+  pinMode(buzzer, OUTPUT);
+  pinMode(btnPlus, INPUT_PULLUP);
+  pinMode(btnMinus, INPUT_PULLUP);
+
+  lcd.init();
+  lcd.backlight();
+
+  wateringTime = EEPROM.read(0);
+  if (wateringTime < 5 || wateringTime > 250) wateringTime = 20;
+
+  tone(buzzer, 1000, 200);
+}
+
+void loop() {
+  int moisture = analogRead(sensorPin);
+  int waterLevel = analogRead(waterLevelPin); // Читаем уровень воды
+  unsigned long currentTime = millis();
+
+  digitalWrite(yellowLED, !configMode); 
+
+  checkModeAndForce(); 
+  handleButtons();     
+
+  // --- ЭКРАН ---
+  lcd.setCursor(0, 0);
+  lcd.print("M:"); lcd.print(moisture);
+  lcd.print(configMode ? " [SET]" : "      "); 
+  
+  lcd.setCursor(10, 0);
+  // Показываем статус воды на верхней строке
+  lcd.print("W:"); lcd.print(waterLevel > waterThreshold ? "OK " : "LOW");
+
+  lcd.setCursor(0, 1);
+  if (waterLevel < waterThreshold) {
+    // Если воды мало - выводим предупреждение и мигаем красным
+    lcd.print("NO WATER! FILLUP");
+    digitalWrite(redLED, (millis() / 500) % 2); // Мигание раз в полсекунды
+  } else if (configMode) {
+    lcd.print("Setup: Use + / -");
+    digitalWrite(redLED, LOW);
+  } else {
+    digitalWrite(redLED, LOW);
+    // Таймер до следующего полива
+    if (currentTime - lastWaterTime < wateringInterval && lastWaterTime != 0) {
+      unsigned long timeLeft = (wateringInterval - (currentTime - lastWaterTime)) / 1000;
+      lcd.print("Next: ");
+      lcd.print(timeLeft / 3600); lcd.print("h ");
+      lcd.print((timeLeft % 3600) / 60); lcd.print("m   ");
+    } else {
+      lcd.print("Status: READY   ");
+    }
+  }
+
+  // --- АВТОПОЛИВ ---
+  // Добавлена проверка: waterLevel > waterThreshold
+  if (!configMode && waterLevel > waterThreshold && moisture < moistureThreshold && 
+     (currentTime - lastWaterTime > wateringInterval || lastWaterTime == 0)) {
+    waterPlant(false);
+    lastWaterTime = millis();
+  }
+
+  delay(100);
+}
+
+void checkModeAndForce() {
+  if (digitalRead(btnPlus) == LOW && digitalRead(btnMinus) == LOW) {
+    unsigned long pressStart = millis();
+    while (digitalRead(btnPlus) == LOW && digitalRead(btnMinus) == LOW) {
+      if (millis() - pressStart > 2000) { 
+        configMode = !configMode;
+        if (configMode) {
+          digitalWrite(blueLED, HIGH);
+          tone(buzzer, 1200, 300);
+        } else {
+          digitalWrite(blueLED, LOW);
+          EEPROM.update(0, wateringTime);
+          tone(buzzer, 800, 300);
+        }
+        while(digitalRead(btnPlus) == LOW || digitalRead(btnMinus) == LOW);
+        return;
+      }
+    }
+    // Ручной запуск (только если есть вода)
+    if (!configMode && (millis() - pressStart > 100) && analogRead(waterLevelPin) > waterThreshold) {
+       waterPlant(true);
+       lastWaterTime = millis();
+    }
+  }
+}
+
+void handleButtons() {
+  if (!configMode) return;
+  if (millis() - lastButtonTime < 200) return;
+  
+  if (digitalRead(btnPlus) == LOW) {
+    wateringTime += 5;
+    if (wateringTime > 250) wateringTime = 250;
+    lastButtonTime = millis();
+    tone(buzzer, 1500, 20);
+  } 
+  else if (digitalRead(btnMinus) == LOW) {
+    wateringTime -= 5;
+    if (wateringTime < 5) wateringTime = 5;
+    lastButtonTime = millis();
+    tone(buzzer, 1300, 20);
+  }
+}
+
+void waterPlant(bool isForced) {
+  // Двойная проверка уровня воды перед включением помпы
+  if (analogRead(waterLevelPin) < waterThreshold) return;
+
+  digitalWrite(yellowLED, LOW);
+  digitalWrite(pumpPin, HIGH);
+  digitalWrite(greenLED, HIGH);
+  
+  lcd.setCursor(0, 1);
+  lcd.print(isForced ? "MANUAL WATERING " : "AUTO WATERING   ");
+
+  for (int i = 0; i < wateringTime; i++) {
+    delay(1000);
+    // Экстренная остановка или если вода закончилась в процессе
+    if ((digitalRead(btnPlus) == LOW && digitalRead(btnMinus) == LOW) || analogRead(waterLevelPin) < waterThreshold) break; 
+  }
+
+  digitalWrite(pumpPin, LOW);
+  digitalWrite(greenLED, LOW);
+}
